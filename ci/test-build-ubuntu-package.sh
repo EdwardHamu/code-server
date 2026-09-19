@@ -14,6 +14,7 @@ sha=$(sha256sum "$tmp/node.tar.xz" | awk '{print $1}')
 printf 'export const x=1\n' > "$tmp/src/lite/server.mjs"
 printf 'export const y=1\n' > "$tmp/src/lite/files.mjs"
 printf 'export const z=1\n' > "$tmp/src/lite/git.mjs"
+printf 'export const w=1\n' > "$tmp/src/lite/state.mjs"
 echo '<html></html>' > "$tmp/src/lite/public/index.html"
 echo '/* css */' > "$tmp/src/lite/public/style.css"
 echo 'console.log(1)' > "$tmp/src/lite/public/app.js"
@@ -63,6 +64,11 @@ grep -q 'Architecture: amd64' "$tmp/info.txt"
 dpkg-deb -c "$tmp/out/code-server_0.1.0+lite.1-1_amd64.deb" > "$tmp/contents.txt"
 grep -q './usr/bin/code-server' "$tmp/contents.txt"
 grep -q './usr/lib/code-server/lite/server.mjs' "$tmp/contents.txt"
+grep -q './usr/lib/code-server/lite/state.mjs' "$tmp/contents.txt"
+# Every module imported by the runtime must ship in the package.
+for module in $(grep -oE "from '\./[a-z]+\.mjs'" "$root/lite/server.mjs" | grep -oE '[a-z]+\.mjs'); do
+  grep -q "./usr/lib/code-server/lite/$module" "$tmp/contents.txt" || { echo "FAIL: package missing lite/$module"; exit 1; }
+done
 grep -q './usr/lib/code-server/node/bin/node' "$tmp/contents.txt"
 ! grep -q 'secret.ts' "$tmp/contents.txt"
 ! grep -q 'patches' "$tmp/contents.txt"

@@ -50,7 +50,7 @@ deb_version_from_tag() {
 copy_runtime() {
   local src=$1 dest=$2
   mkdir -p "$dest/lite/public"
-  cp -- "$src/lite/server.mjs" "$src/lite/files.mjs" "$src/lite/git.mjs" "$dest/lite/"
+  cp -- "$src/lite/server.mjs" "$src/lite/files.mjs" "$src/lite/git.mjs" "$src/lite/state.mjs" "$dest/lite/"
   cp -- "$src/lite/public/index.html" "$src/lite/public/app.js" "$src/lite/public/style.css" "$dest/lite/public/"
   cp -- "$src/README.md" "$src/LICENSE" "$dest/"
   if [[ -f $src/docs/mcp-lite-editor.md ]]; then

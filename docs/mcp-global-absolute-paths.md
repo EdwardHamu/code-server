@@ -51,3 +51,10 @@
 - 前端新增历史目录下拉、“移除此历史”“清空历史”。
 - 验证：Windows `npm test` 22 项 21 通过 1 跳过；Edge `npm run test:browser` 通过（含历史选择/移除与服务器持久化文件核对）；Linux 副本 22/22；`git diff --check` 通过。
 - 生产服务器（root 单元，`HOME=/root`）安装新版本后状态文件将写到 `/root/.code-server-lite/state.json`，无需改单元；旧 code-lite 单元需保证 HOME 可写或加 `--state-file`。
+
+## v0.1.2 部署中止（2026-09-19）
+
+- 服务器下载 `code-server_0.1.2-1_amd64.deb`（sha256 `5b3374dcc968dc19c3b9a60362b77e2f5a368737d599a5b8087438f1f2a97653`，Tag v0.1.2），解包发现 `usr/lib/code-server/lite/` 缺少 `state.mjs`，而 `server.mjs` 已 `import './state.mjs'`。在服务器用包内 Node 试运行（临时端口，未触及正式服务）立即 `ERR_MODULE_NOT_FOUND`。
+- 因此**未安装** v0.1.2，生产仍为 v0.1.1（root 单元，运行正常）。
+- 根因：`ci/build-ubuntu-package.sh` 的 `copy_runtime` 使用固定文件列表，未包含新增的 `lite/state.mjs`。已修复并在 `ci/test-build-ubuntu-package.sh` 增加校验：包内必须含 `state.mjs`，且 `lite/server.mjs` 静态导入的全部同目录模块都必须打入包。离线打包测试在本地 Linux 通过（Windows 无 dpkg-deb 跳过）。
+- 后续：提交此修复，发布 v0.1.3（或重新发布），再安装。服务器 `/tmp/code-server_0.1.2-1_amd64.deb` 与 `/tmp/x` 为检查残留，可删除。
