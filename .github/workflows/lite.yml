@@ -23,6 +23,7 @@ jobs:
       - run: npm run measure
       - run: npm pack --ignore-scripts
       - run: bash scripts/test-release-ubuntu.sh
+      - run: bash ci/test-publish-ubuntu-release.sh
       - run: bash ci/test-build-ubuntu-package.sh
         if: runner.os == 'Linux'
       - uses: actions/upload-artifact@v4

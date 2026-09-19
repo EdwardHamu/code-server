@@ -56,6 +56,12 @@ bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1
 - `bash scripts/test-release-ubuntu.sh`：17 项离线用例（假 gh/git/通知）。不访问 GitHub，不弹真窗。
 - `bash ci/test-build-ubuntu-package.sh`：需要 `dpkg-deb`。假 Node 压缩包、curl 前两次失败后成功、校验 control 含 Ubuntu 18.10 与 libc6 >= 2.28、拒绝把 `src/` 打进包。
 - 未对真实 GitHub 执行 push、workflow_dispatch 或创建 Release。
+
+## 5.1 上传步骤 404 静默失败
+
+`gh api` 在 Release 不存在时返回 HTTP 404 且退出码非 0。原先内联步骤使用 `set -euo pipefail`，并把查询放在管道/`$()` 里，404 会立刻让整个 step 失败；stderr 被丢到 `/dev/null`，Actions 只显示 exit code 1。
+
+现改为 `ci/publish-ubuntu-release.sh`：用 `set +e` 读响应头，**404 表示可以创建**，200 拒绝覆盖，其它状态重试。已用离线用例复现旧行为并锁定新行为。
 - 未在真实 Ubuntu 18.10 机器上安装或启动该包。
 
 ## 6. 安全与范围

@@ -61,6 +61,9 @@ jobs:
       - name: Offline release-script tests
         run: bash scripts/test-release-ubuntu.sh
 
+      - name: Offline release-upload tests
+        run: bash ci/test-publish-ubuntu-release.sh
+
       - name: Build Ubuntu 18.10 amd64 packages
         run: |
           set -euo pipefail
@@ -99,51 +102,4 @@ jobs:
           retention-days: 14
 
       - name: Upload GitHub Release
-        run: |
-          set -euo pipefail
-          retry() {
-            local attempt=1 delay=2 rc=1
-            while (( attempt <= 5 )); do
-              if "$@"; then return 0; else rc=$?; fi
-              echo "retry $attempt failed ($rc): $*" >&2
-              if (( attempt < 5 )); then sleep "$delay"; delay=$((delay * 2)); (( delay <= 30 )) || delay=30; fi
-              attempt=$((attempt + 1))
-            done
-            return "$rc"
-          }
-          exists=0
-          for attempt in 1 2 3 4 5; do
-            http=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --silent --include 2>/dev/null | tr -d '\r' | awk 'NR==1{print $2; exit}')
-            case "$http" in
-              200) exists=1; break ;;
-              404) exists=0; break ;;
-              *) echo "release lookup HTTP ${http:-none}, attempt $attempt" >&2; sleep $((attempt * 2)) ;;
-            esac
-            if [[ $attempt == 5 ]]; then echo "cannot determine whether $RELEASE_TAG exists" >&2; exit 1; fi
-          done
-          if [[ $exists == 1 ]]; then
-            echo "Release $RELEASE_TAG already exists; refusing to overwrite." >&2
-            exit 1
-          fi
-          notes=$(mktemp)
-          cat > "$notes" <<EOF
-          Ubuntu 18.10 (cosmic) amd64 installer for code-server lite.
-
-          - Target: Ubuntu 18.10, glibc >= 2.28, amd64
-          - Bundled Node.js ${NODE_VERSION} linux-x64
-          - Source: \`${SOURCE_SHA}\`
-          - Request: \`${REQUEST_ID}\`
-
-          Ubuntu 18.10 is end-of-life. Install with:
-
-          \`\`\`bash
-          sudo apt-get install ./code-server_*_amd64.deb
-          \`\`\`
-
-          Git is required on the host. Set PASSWORD and run \`code-server --root /path\`.
-          EOF
-          retry gh release create "$RELEASE_TAG" dist/*.deb dist/*.tar.gz dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$SOURCE_SHA" \
-            --title "Ubuntu 18.10 $RELEASE_TAG" \
-            --notes-file "$notes"
+        run: bash ci/publish-ubuntu-release.sh
