@@ -17,7 +17,7 @@ execFileSync('git',['init','-b','main'],{cwd:root,stdio:'ignore',windowsHide:tru
 execFileSync('git',['config','user.name','Browser Test'],{cwd:root,windowsHide:true});
 execFileSync('git',['config','user.email','browser@example.invalid'],{cwd:root,windowsHide:true});
 const password='temporary-browser-password';
-const app=await createApp({root,password});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
+const app=await createApp({root,password,stateFile:path.join(tmp,'state.json')});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
 const url=`http://127.0.0.1:${app.server.address().port}/`;
 let browser, socket, serial=0, session;
 const pending=new Map(), errors=[];
@@ -78,11 +78,18 @@ try{
  await evaluate('$("parent-folder").click()');
  await until(`state.directory===${JSON.stringify(tmp)}`);
  assert.equal(await evaluate('state.file.path'),globalFile);
+ assert.equal(await evaluate('$("recent-dirs").options.length'),4);
+ assert.equal(await evaluate('$("recent-dirs").options[1].value'),tmp);
+ await evaluate(`$('recent-dirs').value=${JSON.stringify(outside)};$('recent-dirs').dispatchEvent(new Event('change'))`);
+ await until(`state.directory===${JSON.stringify(outside)}`);
+ assert.equal(await evaluate('$("recent-dirs").options[1].value'),outside);
+ await evaluate('$("forget-recent").click()');await until('$("recent-dirs").options.length===3');
+ assert.equal(JSON.parse(await fs.readFile(path.join(tmp,'state.json'),'utf8')).recentDirectories.some(e=>e.path===outside),false);
  await send('HeapProfiler.collectGarbage');const loaded=await send('Performance.getMetrics');
  assert.deepEqual(errors,[]);
  if(process.env.SCREENSHOT){const shot=await send('Page.captureScreenshot',{format:'png'});await fs.writeFile(process.env.SCREENSHOT,Buffer.from(shot.data,'base64'));}
  const heap=m=>Object.fromEntries(m.metrics.filter(x=>['JSHeapUsedSize','JSHeapTotalSize','Nodes','Documents','JSEventListeners'].includes(x.name)).map(x=>[x.name,x.value]));
- console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, absolute directory navigation, external file/folder creation and save, failed navigation preserves tree, parent navigation preserves editor, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
+ console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, absolute directory navigation, external file/folder creation and save, failed navigation preserves tree, parent navigation preserves editor, recent-directory list/select/forget with server persistence, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
 }catch(e){console.error(e);process.exitCode=1;}
 finally{
  if(socket?.readyState===1){try{await send('Browser.close',{},null);}catch{}socket.close();}

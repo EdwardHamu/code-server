@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {createApp, parseArgs} from '../server.mjs';
+import {createApp, parseArgs, defaultStateFile} from '../server.mjs';
 import {MAX_FILE, fileTarget} from '../files.mjs';
 
 const password = 'test-only-password-123';
@@ -12,7 +12,7 @@ function git(root, args) { return execFileSync('git', args, {cwd:root, encoding:
 async function setup(t, options = {}) {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'code-lite-test-'));
   const root = path.join(folder,'work'); await fs.mkdir(root);
-  const app = await createApp({root,password,...options});
+  const app = await createApp({root,password,stateFile:path.join(folder,'state','state.json'),...options});
   await new Promise(r => app.server.listen(0,'127.0.0.1',r));
   const origin = `http://127.0.0.1:${app.server.address().port}`, base = origin + (options.basePath || '');
   let cookie = '', csrf = '';
@@ -244,4 +244,40 @@ test('absolute path syntax follows server OS and rejects ambiguous or unsafe for
   for (const name of ['/etc/../secret', '//etc/file', '/etc/.git/config', '/etc/file\0']) {
     assert.throws(() => fileTarget('/srv/work', name, false, path.posix), {status:400}, name);
   }
+});
+test('opened directories persist across restarts with bounded history and removal', async t => {
+  const f = await setup(t); await f.login();
+  const first = path.join(f.folder, 'first'), second = path.join(f.folder, 'second'); await fs.mkdir(first); await fs.mkdir(second);
+  assert.deepEqual((await f.request('session')).json.recentDirectories, []);
+  assert.equal((await f.request('files?path=' + encodeURIComponent(first))).status, 200);
+  assert.deepEqual((await f.request('recent')).json.recentDirectories, [], 'tree expansion without remember is not recorded');
+  assert.equal((await f.request('files?path=' + encodeURIComponent(first) + '&remember=1')).status, 200);
+  assert.equal((await f.request('files?path=' + encodeURIComponent(second) + '&remember=1')).status, 200);
+  assert.equal((await f.request('files?path=' + encodeURIComponent(path.join(f.folder, 'missing')) + '&remember=1')).status, 404);
+  assert.equal((await f.request('files?path=' + encodeURIComponent(first) + '&remember=1')).status, 200);
+  let recent = (await f.request('recent')).json;
+  assert.equal(recent.lastDirectory, first); assert.deepEqual(recent.recentDirectories.map(e => e.path), [first, second]);
+  await f.app.close();
+  const stateFile = path.join(f.folder, 'state', 'state.json');
+  assert.equal((await fs.stat(stateFile)).isFile(), true);
+  assert.equal((await fs.readdir(path.join(f.folder, 'state'))).some(n => n.startsWith('.state-')), false);
+  const reopened = await createApp({root:f.root, password, stateFile});
+  await new Promise(r => reopened.server.listen(0, '127.0.0.1', r));
+  t.after(() => reopened.close());
+  const origin = `http://127.0.0.1:${reopened.server.address().port}`;
+  const login = await fetch(origin + '/api/login', {method:'POST', headers:{Origin:origin, 'Content-Type':'application/json'}, body:JSON.stringify({password})});
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const session = await (await fetch(origin + '/api/session', {headers:{Cookie:cookie}})).json();
+  assert.equal(session.lastDirectory, first); assert.deepEqual(session.recentDirectories.map(e => e.path), [first, second]);
+  const post = (data) => fetch(origin + '/api/recent', {method:'POST', headers:{Cookie:cookie, Origin:origin, 'Content-Type':'application/json', 'X-Lite-CSRF':session.csrf}, body:JSON.stringify(data)});
+  assert.deepEqual((await (await post({action:'forget', path:first})).json()), {lastDirectory:second, recentDirectories:[{path:second, openedAt:session.recentDirectories[1].openedAt}]});
+  assert.equal((await post({action:'bogus'})).status, 400);
+  for (let i = 0; i < 35; i++) { const dir = path.join(f.folder, 'many' + i); await fs.mkdir(dir); await fetch(origin + '/api/files?path=' + encodeURIComponent(dir) + '&remember=1', {headers:{Cookie:cookie}}); }
+  assert.equal((await (await fetch(origin + '/api/recent', {headers:{Cookie:cookie}})).json()).recentDirectories.length, 30);
+  assert.deepEqual((await (await post({action:'clear'})).json()), {lastDirectory:'', recentDirectories:[]});
+  await reopened.close();
+  assert.deepEqual(JSON.parse(await fs.readFile(stateFile, 'utf8')), {lastDirectory:'', recentDirectories:[]});
+  assert.equal(parseArgs(['--state-file', 'none']).stateFile, '');
+  assert.throws(() => parseArgs(['--state-file', 'relative.json']), /absolute/);
+  assert.equal(defaultStateFile({HOME:'/var/lib/x'}), path.join('/var/lib/x', '.code-server-lite', 'state.json'));
 });

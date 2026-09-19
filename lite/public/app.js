@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const state = {csrf: '', file: null, dirty: false, busy: false, opening: 0, treeEpoch: 0, gitEpoch: 0, directory: '', parent: '', pathStyle: 'posix'};
+const state = {csrf: '', file: null, dirty: false, busy: false, opening: 0, treeEpoch: 0, gitEpoch: 0, directory: '', parent: '', pathStyle: 'posix', recent: []};
 const code = $('code');
 function notice(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); }
 function login(show) { $('login-overlay').hidden = !show; if (show) $('password').focus(); }
@@ -113,8 +113,8 @@ async function save() {
     Object.assign(file, result); setDirty(code.value !== content); notice('已保存到服务器');
   } finally { state.busy = false; setDirty(state.dirty); }
 }
-async function populate(container, path, epoch) {
-  const result = await api('files?path=' + encodeURIComponent(path));
+async function populate(container, path, epoch, remember = false) {
+  const result = await api('files?path=' + encodeURIComponent(path) + (remember ? '&remember=1' : ''));
   if (epoch !== state.treeEpoch || !container.isConnected) return;
   container.replaceChildren();
   for (const item of result.entries) {
@@ -136,12 +136,21 @@ async function populate(container, path, epoch) {
 }
 async function refreshFiles(target = state.directory) {
   const epoch = ++state.treeEpoch;
-  const result = await populate($('tree'), target, epoch);
+  const result = await populate($('tree'), target, epoch, true);
   if (!result || epoch !== state.treeEpoch) return;
   state.directory = result.path; state.parent = result.parent;
   $('directory-path').value = result.path;
   $('parent-folder').disabled = result.parent === result.path;
+  await refreshRecent();
 }
+function renderRecent(recent) {
+  state.recent = recent.recentDirectories;
+  const select = $('recent-dirs');
+  select.replaceChildren(...[Object.assign(document.createElement('option'), {value:'', textContent:state.recent.length ? `历史目录（${state.recent.length}）` : '暂无历史目录'})],
+    ...state.recent.map(entry => Object.assign(document.createElement('option'), {value:entry.path, textContent:entry.path, title:new Date(entry.openedAt).toLocaleString()})));
+  $('forget-recent').disabled = $('clear-recent').disabled = !state.recent.length;
+}
+async function refreshRecent() { renderRecent(await api('recent')); }
 function absolutePath(value) {
   return state.pathStyle === 'windows' ? /^[a-z]:[\\/]/i.test(value) : value.startsWith('/');
 }
@@ -208,7 +217,10 @@ async function gitAction(data) {
 }
 async function enter() {
   const session = await api('session'); state.csrf = session.csrf; state.pathStyle = session.pathStyle; $('workspace').textContent = session.workspace; login(false);
-  await refreshFiles(); notice('已连接 · Ctrl/Cmd S 保存 · 单文件上限 1 MiB');
+  renderRecent(session);
+  try { await refreshFiles(session.lastDirectory || ''); }
+  catch (e) { if (!session.lastDirectory) throw e; notice('上次目录不可用，已回到初始目录：' + e.message, true); await refreshFiles(''); return; }
+  notice('已连接 · Ctrl/Cmd S 保存 · 单文件上限 1 MiB');
 }
 $('login-form').addEventListener('submit', async e => {
   e.preventDefault(); $('login-button').disabled = true; $('login-error').textContent = '';
@@ -217,6 +229,9 @@ $('login-form').addEventListener('submit', async e => {
   finally { $('login-button').disabled = false; }
 });
 on('open-directory', browseDirectory);
+$('recent-dirs').addEventListener('change', () => { const target = $('recent-dirs').value; if (target) refreshFiles(target).catch(err => { notice(err.message, true); $('recent-dirs').value = ''; }); });
+on('forget-recent', async () => { const target = $('recent-dirs').value || state.directory; renderRecent(await api('recent', {action:'forget', path:target})); notice('已从历史移除 ' + target); });
+on('clear-recent', async () => { if (confirm('清空全部目录历史？')) { renderRecent(await api('recent', {action:'clear'})); notice('目录历史已清空'); } });
 on('parent-folder', () => refreshFiles(state.parent));
 $('directory-path').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); browseDirectory().catch(err => notice(err.message, true)); } });
 on('save', save); on('refresh-files', refreshFiles); on('files-tab', () => selectTab(false));

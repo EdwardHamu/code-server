@@ -32,3 +32,22 @@
 - 本地 Linux 副本（Node.js 20.20.2，辅助跨平台验证，不替代项目要求的 Node.js 24）：21/21 测试通过，包括 POSIX 权限位保存。
 - `get_diagnostics` 的 `lite` 范围错误/警告为 0；`git diff --check` 通过。
 - 所有写入测试均使用临时夹具，没有对生产目录执行试写，没有部署、提交或推送本项目。
+
+## 生产部署（2026-09-19）
+
+- 通过本机 `ssh vultr` 在 Ubuntu 18.10 主机安装 `code-server_0.1.1-1_amd64.deb`（sha256 `4a6cadccab3693506937a7d5e6e888f40aaf9a3aef1cdb79bdee7c3ee3e781e8`），从 `0.1.0+lite.1-1` 升级；包内含 `fileTarget`/`open-directory` 新功能，捆绑 Node 24.12.0。
+- `systemctl restart code-server-lite` 后服务 active、NRestarts=0；`http://127.0.0.1:8444/vscode/` 与 `https://meamoe.top/vscode/` 均返回 200，页面已包含新目录导航。
+- 安装包备份在服务器 `/root/code-server_0.1.1-1_amd64.deb`。未修改 systemd 单元、nginx、密码或工作区权限。
+- 原单元 `User=code-lite`、`ProtectSystem=strict`、`ProtectHome=true`、`ReadWritePaths=/srv/code-workspace /var/lib/code-server-lite`，项目外路径多数只读。
+- 经用户确认改为完全 root、无沙箱：`User=root`、`HOME=/root`、`UMask=0022`，移除 ProtectSystem/ProtectHome/ReadWritePaths/NoNewPrivileges/PrivateTmp。原单元备份为 `/etc/systemd/system/code-server-lite.service.bak-20260919131533`。重启后 active、进程以 root 运行、公网 200。
+- 安全影响：网页密码等同于服务器 root 文件读写权限；Git filter/凭据助手/SSH 以 root 执行。建议使用强密码并限制访问来源。
+
+## 目录持久化与历史记录
+
+- 新增 `lite/state.mjs`：保存 `lastDirectory` 与 `recentDirectories`（最多 30 条，最近优先，含 `openedAt`），JSON 文件权限 0600，临时文件加 rename 原子写入，写入串行化。
+- 记录触发：`GET /api/files?remember=1`，前端仅在“打开目录/上级目录/历史选择/新建后定位/刷新”调用；树内展开子目录不记录。列表失败（404/403）不记录。
+- `GET /api/session` 返回历史与上次目录；登录后自动回到上次目录，不可用时回退初始目录并提示。`GET/POST /api/recent` 支持 `forget`/`clear`，POST 受 CSRF 校验。
+- 状态文件默认 `$CODE_SERVER_LITE_HOME|$HOME|$USERPROFILE/.code-server-lite/state.json`，`--state-file /绝对路径` 覆盖，`--state-file none` 关闭（仅内存）。
+- 前端新增历史目录下拉、“移除此历史”“清空历史”。
+- 验证：Windows `npm test` 22 项 21 通过 1 跳过；Edge `npm run test:browser` 通过（含历史选择/移除与服务器持久化文件核对）；Linux 副本 22/22；`git diff --check` 通过。
+- 生产服务器（root 单元，`HOME=/root`）安装新版本后状态文件将写到 `/root/.code-server-lite/state.json`，无需改单元；旧 code-lite 单元需保证 HOME 可写或加 `--state-file`。

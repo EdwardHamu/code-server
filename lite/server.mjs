@@ -7,17 +7,18 @@ import {randomBytes, scrypt, scryptSync, timingSafeEqual} from 'node:crypto';
 import {promisify} from 'node:util';
 import {createFiles, digest, fail, HttpError, MAX_FILE} from './files.mjs';
 import {createGit} from './git.mjs';
+import {createState} from './state.mjs';
 
 const scryptAsync = promisify(scrypt);
 const PUBLIC = fileURLToPath(new URL('./public/', import.meta.url));
 const TTL = 30 * 60 * 1000, ABSOLUTE_TTL = 8 * 60 * 60 * 1000;
-export async function createApp({root, password, secureCookie = false, origin = '', basePath = ''}) {
+export async function createApp({root, password, secureCookie = false, origin = '', basePath = '', stateFile = defaultStateFile()}) {
   if (typeof password !== 'string' || password.length < 12 || password.length > 1024) throw new Error('PASSWORD must contain 12–1024 characters');
   if (basePath && !/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(basePath)) throw new Error('Invalid base path; use e.g. /code');
   if (origin && new URL(origin).origin !== origin) throw new Error('Origin must be an exact http(s) origin, without a path or trailing slash');
   if (origin && !/^https?:\/\//.test(origin)) throw new Error('Origin must use HTTP or HTTPS');
   if (origin.startsWith('https:') && !secureCookie) throw new Error('HTTPS origin requires --secure-cookie');
-  const files = await createFiles(root), git = createGit(files.root);
+  const files = await createFiles(root), git = createGit(files.root), state = await createState(stateFile);
   const salt = randomBytes(16), key = scryptSync(password, salt, 32);
   password = null;
   const sessions = new Map(), failures = new Map();
@@ -113,8 +114,13 @@ export async function createApp({root, password, secureCookie = false, origin = 
       }
       const session = sessionFor(req, res);
       if (req.method === 'GET') {
-        if (route === '/api/session') json(res, 200, {csrf: session.csrf, workspace: files.root, pathStyle: process.platform === 'win32' ? 'windows' : 'posix', maxFileBytes: MAX_FILE});
-        else if (route === '/api/files') json(res, 200, await files.list(url.searchParams.get('path') || ''));
+        if (route === '/api/session') json(res, 200, {csrf: session.csrf, workspace: files.root, pathStyle: process.platform === 'win32' ? 'windows' : 'posix', maxFileBytes: MAX_FILE, ...state.recent()});
+        else if (route === '/api/files') {
+          const listing = await files.list(url.searchParams.get('path') || '');
+          if (url.searchParams.get('remember') === '1') await state.remember(listing.path);
+          json(res, 200, listing);
+        }
+        else if (route === '/api/recent') json(res, 200, state.recent());
         else if (route === '/api/file') json(res, 200, await files.read(url.searchParams.get('path')));
         else if (route === '/api/git/status') json(res, 200, await exclusive(() => git.status()));
         else if (route === '/api/git/diff') json(res, 200, await exclusive(() => git.diff(url.searchParams.get('path'), url.searchParams.get('staged') === '1')));
@@ -127,6 +133,12 @@ export async function createApp({root, password, secureCookie = false, origin = 
         else if (route === '/api/create') json(res, 200, await exclusive(() => files.create(data)));
         else if (route === '/api/delete') json(res, 200, await exclusive(() => files.remove(data)));
         else if (route === '/api/git/action') json(res, 200, await exclusive(() => git.action(data)));
+        else if (route === '/api/recent') {
+          if (data.action === 'clear') await state.clear();
+          else if (data.action === 'forget' && typeof data.path === 'string') await state.forget(data.path);
+          else fail(400, 'Unknown history action');
+          json(res, 200, state.recent());
+        }
         else fail(404, 'Not found');
       } else fail(405, 'Method not allowed');
     } catch (e) {
@@ -139,22 +151,28 @@ export async function createApp({root, password, secureCookie = false, origin = 
   const server = http.createServer({maxHeaderSize: 8192, requestTimeout: 30000, headersTimeout: 10000, keepAliveTimeout: 5000}, handler);
   server.maxConnections = 32;
   server.on('close', () => { clearInterval(cleanup); git.stop(); sessions.clear(); failures.clear(); key.fill(0); });
-  return {server, metrics, root: files.root, async close() { git.stop(); server.closeIdleConnections(); await new Promise(resolve => server.close(resolve)); }};
+  return {server, metrics, root: files.root, stateFile: state.file, async close() { git.stop(); server.closeIdleConnections(); await new Promise(resolve => server.close(resolve)); await state.flush(); }};
+}
+export function defaultStateFile(env = process.env) {
+  const home = env.CODE_SERVER_LITE_HOME || env.HOME || env.USERPROFILE;
+  return home ? path.join(home, '.code-server-lite', 'state.json') : '';
 }
 
 export function parseArgs(argv, env = process.env) {
-  const options = {root: process.cwd(), host: '127.0.0.1', port: 8080, password: env.PASSWORD, secureCookie: false, origin: '', basePath: ''};
+  const options = {root: process.cwd(), host: '127.0.0.1', port: 8080, password: env.PASSWORD, secureCookie: false, origin: '', basePath: '', stateFile: defaultStateFile(env)};
   let rootGiven = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') { options.help = true; continue; }
     if (arg === '--secure-cookie') { options.secureCookie = true; continue; }
-    const flags = {'--root':'root','--host':'host','--port':'port','--origin':'origin','--base-path':'basePath'};
+    const flags = {'--root':'root','--host':'host','--port':'port','--origin':'origin','--base-path':'basePath','--state-file':'stateFile'};
     if (flags[arg]) { if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Missing value for ' + arg); options[flags[arg]] = argv[++i]; if (arg === '--root') rootGiven = true; }
     else if (!arg.startsWith('-') && !rootGiven) { options.root = arg; rootGiven = true; }
     else throw new Error('Unsupported option: ' + arg + '. Use --help; legacy VS Code options are not supported.');
   }
   options.port = Number(options.port);
+  if (options.stateFile === 'none') options.stateFile = '';
+  if (options.stateFile && !path.isAbsolute(options.stateFile)) throw new Error('--state-file must be an absolute path or none');
   if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535) throw new Error('Invalid port');
   if (!options.help && !['127.0.0.1','::1','localhost'].includes(options.host) && (!options.secureCookie || !options.origin.startsWith('https://'))) throw new Error('Non-loopback binding requires --secure-cookie and --origin https://your-domain. Put a TLS reverse proxy in front; do not expose this HTTP port directly.');
   return options;
@@ -162,14 +180,14 @@ export function parseArgs(argv, env = process.env) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log('code-server lite — files + Git, no VS Code runtime\n\nPASSWORD=<12+ characters> node lite/server.mjs [directory]\n  --root PATH --host 127.0.0.1 --port 8080\n  --origin https://editor.example.com --secure-cookie\n  --base-path /code   (optional)\n\nFor remote use, terminate HTTPS at a reverse proxy. Passwords are accepted only via PASSWORD, never a CLI argument.');
+    console.log('code-server lite — files + Git, no VS Code runtime\n\nPASSWORD=<12+ characters> node lite/server.mjs [directory]\n  --root PATH --host 127.0.0.1 --port 8080\n  --origin https://editor.example.com --secure-cookie\n  --base-path /code   (optional)\n  --state-file PATH   (recent directories; default ~/.code-server-lite/state.json, none to disable)\n\nFor remote use, terminate HTTPS at a reverse proxy. Passwords are accepted only via PASSWORD, never a CLI argument.');
     return;
   }
   delete process.env.PASSWORD;
   const app = await createApp(options); options.password = null;
   await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(options.port, options.host, resolve); });
   console.log(`code-server lite listening on http://${options.host}:${options.port}${options.basePath}/`);
-  console.log(`Workspace: ${app.root}; remote users must connect through HTTPS. No extension host, language server or file watcher is running.`);
+  console.log(`Workspace: ${app.root}; directory history: ${app.stateFile || 'disabled'}; remote users must connect through HTTPS. No extension host, language server or file watcher is running.`);
   for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => { app.close().then(() => process.exit(0)); const timer = setTimeout(() => process.exit(1), 5000); timer.unref(); });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(e => { console.error(e.message); process.exitCode = 1; });

@@ -8,7 +8,7 @@
   "engines": { "node": "24" },
   "bin": { "code-server": "lite/server.mjs" },
   "main": "lite/server.mjs",
-  "files": ["lite/server.mjs", "lite/files.mjs", "lite/git.mjs", "lite/public/", "README.md", "LICENSE", "docs/mcp-lite-editor.md"],
+  "files": ["lite/server.mjs", "lite/files.mjs", "lite/git.mjs", "lite/state.mjs", "lite/public/", "README.md", "LICENSE", "docs/mcp-lite-editor.md"],
   "scripts": {
     "start": "node lite/server.mjs",
     "build": "node lite/check.mjs",
