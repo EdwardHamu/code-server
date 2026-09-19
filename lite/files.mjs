@@ -23,20 +23,35 @@ export function inside(root, target) {
   const rel = path.relative(root, target);
   return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
 }
+// Absolute paths are server-native. Relative API paths remain compatible with --root.
+export function fileTarget(root, name, allowRoot = false, flavor = path) {
+  if (typeof name !== 'string' || name.length > 2048) fail(400, 'Invalid path');
+  if (name === '' && allowRoot) return root;
+  const windows = flavor === path.win32;
+  const absolute = windows ? /^[a-z]:[\\/]/i.test(name) : name.startsWith('/');
+  if (!absolute) { relativeName(name, allowRoot); return flavor.join(root, name); }
+  // No UNC shares, device namespaces, drive-relative paths or ADS.
+  const normalized = windows ? name.replace(/\\/g, '/') : name;
+  const anchor = flavor.parse(normalized).root;
+  const rest = normalized.slice(anchor.length).replace(/\/$/, '');
+  if (rest) relativeName(rest);
+  else if (!allowRoot) fail(400, 'A file or directory name is required');
+  return flavor.join(anchor, rest);
+}
 export async function createFiles(directory) {
   const root = await fs.realpath(directory);
   if (!(await fs.stat(root)).isDirectory()) fail(400, 'Workspace must be a directory');
   async function resolve(name, {newLeaf = false, allowRoot = false} = {}) {
-    relativeName(name, allowRoot);
-    let current = root;
-    const parts = name ? name.split('/') : [];
+    const target = fileTarget(root, name, allowRoot);
+    const anchor = path.parse(target).root;
+    let current = anchor;
+    const parts = target.slice(anchor.length).split(path.sep).filter(Boolean);
     for (const [i, part] of parts.entries()) {
       current = path.join(current, part);
       let st;
       try { st = await fs.lstat(current); }
       catch (e) { if (e.code === 'ENOENT' && newLeaf && i === parts.length - 1) return current; throw e; }
       if (st.isSymbolicLink() || st.isFile() && st.nlink > 1) fail(403, 'Links are not exposed by this editor');
-      if (!inside(root, await fs.realpath(current))) fail(403, 'Path is outside workspace');
       if (i < parts.length - 1 && !st.isDirectory()) fail(400, 'Parent is not a directory');
     }
     return current;
@@ -70,7 +85,7 @@ export async function createFiles(directory) {
     const bom = text.startsWith('\uFEFF');
     if (bom) text = text.slice(1);
     const crlf = text.includes('\r\n');
-    return {path: name, content: text, version: digest(data), bytes: data.length, bom, newline: crlf ? '\r\n' : '\n'};
+    return {path: await resolve(name), content: text, version: digest(data), bytes: data.length, bom, newline: crlf ? '\r\n' : '\n'};
   }
   async function list(name = '') {
     const filename = await resolve(name, {allowRoot: true});
@@ -80,11 +95,11 @@ export async function createFiles(directory) {
     for await (const entry of dir) {
       if (entry.name.toLowerCase() === '.git' || entry.name.startsWith('.lite-save-')) continue;
       if (entries.length >= 1000) { truncated = true; break; }
-      entries.push({name: entry.name, path: name ? name + '/' + entry.name : entry.name,
+      entries.push({name: entry.name, path: path.join(filename, entry.name),
         kind: entry.isSymbolicLink() ? 'link' : entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'special'});
     }
     entries.sort((a, b) => (a.kind !== 'directory') - (b.kind !== 'directory') || a.name.localeCompare(b.name));
-    return {entries, truncated};
+    return {path: filename, parent: path.dirname(filename), entries, truncated};
   }
   async function checkVersion(name, version) {
     if (typeof version !== 'string' || !/^[a-f0-9]{64}$/.test(version)) fail(400, 'A saved file version is required');
@@ -113,7 +128,7 @@ export async function createFiles(directory) {
     const filename = await resolve(name, {newLeaf: true});
     if (directory) await fs.mkdir(filename);
     else { const h = await fs.open(filename, 'wx', 0o600); await h.close(); }
-    return {ok: true};
+    return {ok: true, path: filename, parent: path.dirname(filename)};
   }
   async function remove({path: name, version}) {
     const filename = await resolve(name);

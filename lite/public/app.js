@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const state = {csrf: '', file: null, dirty: false, busy: false, opening: 0, treeEpoch: 0, gitEpoch: 0};
+const state = {csrf: '', file: null, dirty: false, busy: false, opening: 0, treeEpoch: 0, gitEpoch: 0, directory: '', parent: '', pathStyle: 'posix'};
 const code = $('code');
 function notice(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); }
 function login(show) { $('login-overlay').hidden = !show; if (show) $('password').focus(); }
@@ -132,13 +132,32 @@ async function populate(container, path, epoch) {
     wrapper.append(node); container.append(wrapper);
   }
   if (result.truncated) { const p = document.createElement('p'); p.className = 'hint'; p.textContent = '为控制内存，本目录只显示前 1000 项。'; container.append(p); }
+  return result;
 }
-async function refreshFiles() { const epoch = ++state.treeEpoch; await populate($('tree'), '', epoch); }
+async function refreshFiles(target = state.directory) {
+  const epoch = ++state.treeEpoch;
+  const result = await populate($('tree'), target, epoch);
+  if (!result || epoch !== state.treeEpoch) return;
+  state.directory = result.path; state.parent = result.parent;
+  $('directory-path').value = result.path;
+  $('parent-folder').disabled = result.parent === result.path;
+}
+function absolutePath(value) {
+  return state.pathStyle === 'windows' ? /^[a-z]:[\\/]/i.test(value) : value.startsWith('/');
+}
+async function browseDirectory() {
+  const target = $('directory-path').value;
+  if (!absolutePath(target)) throw new Error('请输入服务器绝对路径');
+  await refreshFiles(target);
+}
 async function createEntry(directory) {
-  const name = prompt(directory ? '新目录路径（相对工作区，父目录须已存在）' : '新文件路径（相对工作区，父目录须已存在）');
+  const prefix = state.directory.replace(/[\\/]$/, '') + (state.pathStyle === 'windows' ? '\\' : '/');
+  const name = prompt(directory ? '新目录的服务器绝对路径（父目录须已存在）' : '新文件的服务器绝对路径（父目录须已存在）', prefix);
   if (!name) return;
-  await api('create', {path:name, directory}); await refreshFiles(); notice('已创建 ' + name);
-  if (!directory) await openFile(name);
+  if (!absolutePath(name)) throw new Error('请输入服务器绝对路径');
+  const result = await api('create', {path:name, directory});
+  await refreshFiles(result.parent); notice('已创建 ' + result.path);
+  if (!directory) await openFile(result.path);
 }
 function selectTab(git) {
   $('files-panel').hidden = git; $('git-panel').hidden = !git;
@@ -188,7 +207,7 @@ async function gitAction(data) {
   } finally { state.busy = false; code.readOnly = false; setDirty(state.dirty); }
 }
 async function enter() {
-  const session = await api('session'); state.csrf = session.csrf; $('workspace').textContent = session.workspace; login(false);
+  const session = await api('session'); state.csrf = session.csrf; state.pathStyle = session.pathStyle; $('workspace').textContent = session.workspace; login(false);
   await refreshFiles(); notice('已连接 · Ctrl/Cmd S 保存 · 单文件上限 1 MiB');
 }
 $('login-form').addEventListener('submit', async e => {
@@ -197,6 +216,9 @@ $('login-form').addEventListener('submit', async e => {
   catch (err) { $('login-error').textContent = err.message; }
   finally { $('login-button').disabled = false; }
 });
+on('open-directory', browseDirectory);
+on('parent-folder', () => refreshFiles(state.parent));
+$('directory-path').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); browseDirectory().catch(err => notice(err.message, true)); } });
 on('save', save); on('refresh-files', refreshFiles); on('files-tab', () => selectTab(false));
 on('git-tab', async () => { selectTab(true); await refreshGit(); }); on('refresh-git', refreshGit);
 on('new-file', () => createEntry(false)); on('new-folder', () => createEntry(true));

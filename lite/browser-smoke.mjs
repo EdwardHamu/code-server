@@ -58,11 +58,31 @@ try{
  assert.ok(await evaluate('document.querySelectorAll("#colored span").length < 1000'));
  await evaluate('selectTab(true);refreshGit()');
  assert.ok(await evaluate('document.querySelectorAll(".change").length >= 1'));
+ // Exercise server-global browsing and creation through actual UI handlers.
+ const outside=path.join(tmp,'outside');await fs.mkdir(outside);
+ await evaluate(`selectTab(false);$('directory-path').value=${JSON.stringify(outside)};browseDirectory()`);
+ assert.equal(await evaluate('state.directory'),outside);
+ assert.equal(await evaluate('state.file.path'),path.join(root,'large.js'));
+ const globalFile=path.join(outside,'global.txt');
+ await evaluate(`window.originalPrompt=window.prompt;window.prompt=()=>${JSON.stringify(globalFile)};createEntry(false).finally(()=>window.prompt=window.originalPrompt)`);
+ assert.equal(await evaluate('state.file.path'),globalFile);
+ assert.equal(await fs.readFile(globalFile,'utf8'),'');
+ await evaluate('code.value="global saved";code.dispatchEvent(new Event("input"));save()');
+ assert.equal(await fs.readFile(globalFile,'utf8'),'global saved');
+ const globalFolder=path.join(outside,'new-folder');
+ await evaluate(`window.prompt=()=>${JSON.stringify(globalFolder)};createEntry(true).finally(()=>window.prompt=window.originalPrompt)`);
+ assert.ok((await fs.stat(globalFolder)).isDirectory());
+ await evaluate(`$('directory-path').value=${JSON.stringify(path.join(outside,'missing'))};browseDirectory().catch(()=>{})`);
+ assert.equal(await evaluate('state.directory'),outside);
+ assert.equal(await evaluate('document.querySelectorAll("#tree .tree-button").length'),2);
+ await evaluate('$("parent-folder").click()');
+ await until(`state.directory===${JSON.stringify(tmp)}`);
+ assert.equal(await evaluate('state.file.path'),globalFile);
  await send('HeapProfiler.collectGarbage');const loaded=await send('Performance.getMetrics');
  assert.deepEqual(errors,[]);
  if(process.env.SCREENSHOT){const shot=await send('Page.captureScreenshot',{format:'png'});await fs.writeFile(process.env.SCREENSHOT,Buffer.from(shot.data,'base64'));}
  const heap=m=>Object.fromEntries(m.metrics.filter(x=>['JSHeapUsedSize','JSHeapTotalSize','Nodes','Documents','JSEventListeners'].includes(x.name)).map(x=>[x.name,x.value]));
- console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
+ console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, absolute directory navigation, external file/folder creation and save, failed navigation preserves tree, parent navigation preserves editor, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
 }catch(e){console.error(e);process.exitCode=1;}
 finally{
  if(socket?.readyState===1){try{await send('Browser.close',{},null);}catch{}socket.close();}

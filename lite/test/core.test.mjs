@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createApp, parseArgs} from '../server.mjs';
-import {MAX_FILE} from '../files.mjs';
+import {MAX_FILE, fileTarget} from '../files.mjs';
 
 const password = 'test-only-password-123';
 function git(root, args) { return execFileSync('git', args, {cwd:root, encoding:'utf8', windowsHide:true, env:{...process.env,GIT_TERMINAL_PROMPT:'0'}, stdio:['ignore','pipe','pipe']}); }
@@ -77,10 +77,10 @@ test('file creation, lazy listing, UTF-8 BOM/CRLF save and stale-save protection
   assert.equal((await f.request('delete',{path:latest.json.path,version:latest.json.version})).status,200);
   assert.equal((await f.request('file?path='+encodeURIComponent('folder/空 格.js'))).status,404);
 });
-test('path traversal, absolute paths, Git metadata, ADS and special names are blocked', async t => {
+test('path traversal, Git metadata, ADS and special names are blocked', async t => {
   const f = await setup(t); await f.login(); await fs.mkdir(path.join(f.root,'.git'));
   await fs.writeFile(path.join(f.folder,'secret'),'outside');
-  for (const name of ['../secret','/secret','C:/secret','folder/../../secret','.git/config','.GIT/config','a\\..\\secret','file:stream','con','bad.']) {
+  for (const name of ['../secret','folder/../../secret','.git/config','.GIT/config','a\\..\\secret','file:stream','con','bad.']) {
     assert.equal((await f.request('file?path='+encodeURIComponent(name))).status,400,name);
     assert.equal((await f.request('create',{path:name})).status,400,name);
   }
@@ -201,4 +201,47 @@ test('line-dense files and saves are bounded to protect native editor DOM', asyn
   const file=(await f.request('file?path=small.txt')).json;
   assert.equal((await f.request('save',{...file,content:'\n'.repeat(20000)})).status,413);
   assert.equal(await fs.readFile(path.join(f.root,'small.txt'),'utf8'),'keep');
+});
+
+test('absolute server paths outside workspace support create, browse, edit and delete', async t => {
+  const f = await setup(t);
+  const outside = path.join(f.folder, '全局 空格');
+  assert.equal((await f.request('create', {path:outside, directory:true})).status, 401);
+  await f.login();
+  assert.equal((await f.request('session')).json.workspace, await fs.realpath(f.root));
+  assert.equal((await f.request('create', {path:outside, directory:true})).status, 200);
+  const filename = path.join(outside, '文件.txt');
+  const created = await f.request('create', {path:filename});
+  assert.equal(created.status, 200); assert.equal(created.json.path, filename);
+  const listing = await f.request('files?path=' + encodeURIComponent(outside));
+  assert.equal(listing.status, 200); assert.equal(listing.json.path, outside);
+  assert.equal(listing.json.parent, f.folder); assert.equal(listing.json.entries[0].path, filename);
+  const file = (await f.request('file?path=' + encodeURIComponent(filename))).json;
+  const saved = await f.request('save', {...file, content:'outside workspace'});
+  assert.equal(saved.status, 200); assert.equal(await fs.readFile(filename, 'utf8'), 'outside workspace');
+  assert.equal((await f.request('save', {...file, content:'stale'})).status, 409);
+  assert.equal((await f.request('delete', {path:filename, version:saved.json.version})).status, 200);
+  assert.equal((await f.request('create', {path:path.join(outside, 'missing', 'file')})).status, 404);
+  assert.equal((await f.request('create', {path:outside, directory:true})).status, 409);
+  const root = path.parse(outside).root;
+  const rootList = await f.request('files?path=' + encodeURIComponent(root));
+  assert.equal(rootList.status, 200); assert.equal(rootList.json.parent, root);
+  assert.equal((await f.request('create', {path:root, directory:true})).status, 400);
+  await fs.mkdir(path.join(outside, '.git'));
+  assert.equal((await f.request('create', {path:path.join(outside, '.git', 'config')})).status, 400);
+  await fs.symlink(outside, path.join(f.root, 'absolute-link'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal((await f.request('files?path=' + encodeURIComponent(path.join(f.root, 'absolute-link')))).status, 403);
+  assert.equal((await f.request('git/action', {action:'stage', path:outside})).status, 400);
+});
+test('absolute path syntax follows server OS and rejects ambiguous or unsafe forms', () => {
+  assert.equal(fileTarget('/srv/work', '/etc/project/file', false, path.posix), '/etc/project/file');
+  assert.equal(fileTarget('/srv/work', '/', true, path.posix), '/');
+  assert.equal(fileTarget('C:/work', 'D:/projects/file', false, path.win32), 'D:\\projects\\file');
+  assert.equal(fileTarget('C:/work', 'D:\\projects\\file', false, path.win32), 'D:\\projects\\file');
+  for (const name of ['C:relative', '/rooted', '\\\\server\\share', '//server/share', 'C:/file:stream', 'C:/a/../b', 'C:/a//b', 'C:/NUL', 'C:/.git/config']) {
+    assert.throws(() => fileTarget('C:/work', name, false, path.win32), {status:400}, name);
+  }
+  for (const name of ['/etc/../secret', '//etc/file', '/etc/.git/config', '/etc/file\0']) {
+    assert.throws(() => fileTarget('/srv/work', name, false, path.posix), {status:400}, name);
+  }
 });

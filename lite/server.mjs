@@ -113,7 +113,7 @@ export async function createApp({root, password, secureCookie = false, origin = 
       }
       const session = sessionFor(req, res);
       if (req.method === 'GET') {
-        if (route === '/api/session') json(res, 200, {csrf: session.csrf, workspace: path.basename(files.root), maxFileBytes: MAX_FILE});
+        if (route === '/api/session') json(res, 200, {csrf: session.csrf, workspace: files.root, pathStyle: process.platform === 'win32' ? 'windows' : 'posix', maxFileBytes: MAX_FILE});
         else if (route === '/api/files') json(res, 200, await files.list(url.searchParams.get('path') || ''));
         else if (route === '/api/file') json(res, 200, await files.read(url.searchParams.get('path')));
         else if (route === '/api/git/status') json(res, 200, await exclusive(() => git.status()));
