@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>code-server lite</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header class="topbar"><div class="brand"><span class="mark">⌘</span> code-server <small>LITE</small></div><span id="workspace">轻量远程工作区</span><span class="spacer"></span><span class="quiet">FILES + GIT · 按需运行</span><button id="logout">退出登录</button></header>
+<main>
+<aside><nav><button id="files-tab" class="active">文件</button><button id="git-tab">Git 管理</button></nav>
+<section id="files-panel"><div class="panel-title">EXPLORER <button id="refresh-files" title="手动刷新文件树">↻</button></div><div class="tools"><button id="new-file">新建文件</button><button id="new-folder">新建目录</button></div><p class="hint">目录按需展开 · 不持续监视文件</p><div id="tree" aria-label="工作区文件"></div></section>
+<section id="git-panel" hidden><div class="panel-title">SOURCE CONTROL <button id="refresh-git">↻</button></div><div id="branch-label" class="hint"></div><div class="tools"><select id="branches" aria-label="分支"></select><button id="switch-branch">切换</button><button id="new-branch">新分支</button></div><div class="tools"><button id="fetch">Fetch</button><button id="pull">Pull</button><button id="push">Push</button></div><p class="hint">Pull 仅快进 · 无后台网络访问</p><textarea id="commit-message" rows="3" maxlength="4000" placeholder="提交说明（仅提交已暂存内容）" aria-label="提交说明"></textarea><button id="commit" class="primary wide">提交已暂存内容</button><div id="changes"></div></section>
+</aside>
+<section class="workbench"><div class="filebar"><span id="filename">欢迎</span><span id="dirty" aria-label="未保存更改"></span><span class="spacer"></span><label class="quiet"><input id="highlight" type="checkbox" checked> 基本高亮</label><button id="reload-file">重新载入</button><button id="delete-file">删除</button><button id="save" class="primary" disabled>保存 <kbd>Ctrl S</kbd></button></div>
+<div id="findbar"><input id="find-text" placeholder="查找（区分大小写）" aria-label="查找"><button id="find-next">下一个</button><input id="replace-text" placeholder="替换为" aria-label="替换"><button id="replace">替换选中</button></div>
+<div id="welcome"><div class="welcome-icon">{ }</div><h1>只留下代码。</h1><p>从左侧选择文件开始编辑。</p><p class="quiet">单文件缓冲 · 原生编辑 · 按需 Git<br>没有扩展宿主、语言服务或后台索引。</p></div>
+<div id="editor" hidden><pre id="gutter" aria-hidden="true"><span id="gutter-lines"></span></pre><div class="code-surface"><pre id="colored" aria-hidden="true"><code id="highlight-lines"></code></pre><textarea id="code" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="代码编辑区"></textarea></div></div>
+<div id="diff-panel" hidden><div class="filebar"><strong id="diff-title">差异</strong><span class="spacer"></span><button id="close-diff">关闭差异</button></div><pre id="diff"></pre></div>
+<footer><span id="notice" role="status">等待登录</span><span class="spacer"></span><span id="position">UTF-8 · 单文件</span></footer></section>
+</main>
+<div id="login-overlay"><form id="login-form"><div class="brand"><span class="mark">⌘</span> code-server <small>LITE</small></div><h1>连接你的工作区</h1><p class="quiet">文件编辑与 Git，除此之外保持轻量。</p><label for="password">工作区密码</label><input id="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus><button id="login-button" type="submit" class="primary wide">登录</button><p id="login-error" role="alert"></p><p class="hint">远程使用请通过 HTTPS 访问。</p></form></div>
+<script src="app.js" defer></script>
+</body></html>

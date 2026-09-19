@@ -1,3 +1,4 @@
+## Archived upstream workflow; not used by the lightweight runtime.
 name: Trivy Nightly Docker Scan
 
 on:

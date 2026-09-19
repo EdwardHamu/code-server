@@ -22,3 +22,8 @@ test/test-results
 # Quilt's internal data.
 /.pc
 /patches/*.diff~
+
+# Lightweight validation outputs and local release archives.
+/artifacts/
+/code-server-*.tgz
+/dist/
