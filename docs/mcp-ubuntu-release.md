@@ -43,7 +43,7 @@ GitHub 托管 runner 没有 Ubuntu 18.10。`actions/checkout` 等也需要比 co
 bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1
 ```
 
-其它用法见脚本 `--help`。`--allow-remote` 只构建远端、不推送。`--run-id` / `--request-id` 只恢复监控，不重新触发。`--notify-test` 只测弹窗。
+其它用法见脚本 `--help`。`--allow-remote` 只构建远端、不推送。`--run-id` / `--request-id` 只恢复监控，不重新触发。`--notify-test` 只测弹窗。监控到 `success` 后默认继续把该次运行的产物部署到服务器（`--no-deploy` 关闭），细节见 [docs/mcp-release-ubuntu-autodeploy.md](mcp-release-ubuntu-autodeploy.md)。
 
 网络：`gh`/`git push` 经 GNU `timeout` 与指数退避重试（默认 5 次，上限 30 秒）。触发前先查 run list，避免重复 dispatch。监控超时或 Ctrl+C **不取消** 云端作业。
 
@@ -53,7 +53,7 @@ bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1
 
 ## 5. 验证
 
-- `bash scripts/test-release-ubuntu.sh`：17 项离线用例（假 gh/git/通知）。不访问 GitHub，不弹真窗。
+- `bash scripts/test-release-ubuntu.sh`：31 项离线用例（假 gh/git/ssh/scp/通知），含自动部署的成功与失败分支以及 `DEPLOY_DRY_RUN`。不访问 GitHub，不连服务器，不弹真窗。
 - `bash ci/test-build-ubuntu-package.sh`：需要 `dpkg-deb`。假 Node 压缩包、curl 前两次失败后成功、校验 control 含 Ubuntu 18.10 与 libc6 >= 2.28、拒绝把 `src/` 打进包。
 - 未对真实 GitHub 执行 push、workflow_dispatch 或创建 Release。
 

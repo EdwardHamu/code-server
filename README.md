@@ -80,10 +80,13 @@ npm 包仅包含 `lite/` 必要运行文件、此 README、任务报告和 LICEN
 只生成 Ubuntu 18.10 amd64 的 `.deb` / `.tar.gz` 并上传 GitHub Release。工作区必须干净；脚本只推送已有提交，然后触发并监控 `.github/workflows/release-ubuntu.yml`，结束后弹窗：
 
 ```bash
-bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1
+bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1                # 打包成功后自动部署
+bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1 --no-deploy    # 只打包，不部署
 ```
 
-说明、限制和离线测试见 [docs/mcp-ubuntu-release.md](docs/mcp-ubuntu-release.md)。
+监控到构建成功后默认继续部署这次运行的产物：本地按 `SHA256SUMS` 校验 `.deb`，经已有 SSH 别名（默认 `vultr`）上传，在服务器上只读预检、备份、`dpkg --force-confold` 安装并重启服务，最后要求回环与公网地址都返回 200。artifact 缺失或过期、标签不一致、校验失败都不会部署；`DEPLOY_DRY_RUN=1` 可演练整条链路而不改动服务器。
+
+说明、限制和离线测试见 [docs/mcp-ubuntu-release.md](docs/mcp-ubuntu-release.md)，部署细节见 [docs/mcp-release-ubuntu-autodeploy.md](docs/mcp-release-ubuntu-autodeploy.md)。
 
 ## 有意限制
 

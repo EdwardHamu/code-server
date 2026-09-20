@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Git Bash/Linux/macOS Bash. All gh/git network calls use bounded, buffered retries.
 # Pushes existing commits only; never commits, force-pushes, or cancels remote runs.
+# After a successful package run it can deploy that exact run's artifact over an existing
+# SSH alias. Credentials stay in the user's SSH configuration; only the verified artifact
+# and a plain Bash script are sent, and the server keeps a backup before touching dpkg.
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 
 urlencode() {
@@ -12,6 +15,12 @@ urlencode() {
       *) printf '%%%02X' "'$char" ;;
     esac
   done
+}
+
+# Same rule as ci/build-ubuntu-package.sh: v0.1.4 -> 0.1.4-1, v0.1.0-lite.1 -> 0.1.0+lite.1-1.
+debian_version_from_tag() {
+  local value=${1#v}
+  printf '%s-1\n' "${value//-/+}"
 }
 
 one_request() {
@@ -213,12 +222,220 @@ monitor() {
   return 124
 }
 
+# --- Automatic deployment after a successful package run ---------------------
+# Only the verified artifact of the monitored run is deployed. A missing or expired
+# artifact is a hard failure: the script never falls back to "the newest Release".
+ssh_options=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+
+resolve_run_artifact() {
+  local found
+  if ! found=$(retry gh api --paginate "repos/$repo/actions/runs/$run_id/artifacts" \
+    --jq '.artifacts[] | select(.expired == false and (.name | startswith("ubuntu-18.10-amd64-"))) | .name'); then
+    failure_message="查询运行 $run_id 的产物失败；请检查网络或 gh 登录状态"
+    return 1
+  fi
+  found=$(printf '%s' "$found" | tr -d '\r')
+  if [[ -z $found ]]; then
+    failure_message="运行 $run_id 没有未过期的 Ubuntu 产物（可能已超过保留期）；脚本不会回退到 Release 中的最新版本"
+    return 1
+  fi
+  if [[ $found == *$'\n'* ]]; then
+    failure_message="运行 $run_id 有多个 Ubuntu 产物，无法确定应部署哪一个"
+    return 1
+  fi
+  artifact=$found
+  artifact_tag=${artifact#ubuntu-18.10-amd64-}
+  if [[ ! $artifact_tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+    failure_message="产物名称 $artifact 中没有可识别的版本标签，拒绝部署"
+    return 1
+  fi
+  if [[ -n $tag && $artifact_tag != "$tag" ]]; then
+    failure_message="产物标签 $artifact_tag 与本次构建的 $tag 不一致，拒绝部署不匹配的构建"
+    return 1
+  fi
+  tag=$artifact_tag
+  expected_version=$(debian_version_from_tag "$tag")
+}
+
+fetch_run_package() {
+  local candidate actual normalized_actual normalized_expected
+  work=$scratch/deploy
+  mkdir -p "$work"
+  log "运行 $run_id 的产物：$artifact"
+  if ! timeout --foreground "${DEPLOY_TIMEOUT_SECONDS}s" gh run download "$run_id" --repo "$repo" \
+    --name "$artifact" --dir "$work" >/dev/null; then
+    failure_message="下载产物 $artifact 失败；重跑脚本会安全地重新下载，不会重复部署"
+    return 1
+  fi
+  packages=()
+  for candidate in "$work"/code-server_*_amd64.deb; do
+    [[ -e $candidate ]] || continue
+    packages+=("$candidate")
+  done
+  if (( ${#packages[@]} != 1 )); then
+    failure_message="产物中 amd64 安装包数量为 ${#packages[@]}，期望恰好一个"
+    return 1
+  fi
+  package=${packages[0]##*/}
+  if [[ ! $package =~ ^code-server_[0-9A-Za-z.+~_-]+_amd64\.deb$ ]]; then
+    failure_message="安装包文件名 $package 不符合预期"
+    return 1
+  fi
+  [[ -s $work/SHA256SUMS ]] || { failure_message='产物缺少 SHA256SUMS'; return 1; }
+  expected=$(awk -v name="$package" '$2 == name || $2 == "*" name {print $1}' "$work/SHA256SUMS")
+  if [[ ! $expected =~ ^[a-fA-F0-9]{64}$ ]]; then
+    failure_message="SHA256SUMS 中没有 $package 的有效校验值"
+    return 1
+  fi
+  actual=$(sha256sum -- "${packages[0]}") || { failure_message='无法计算安装包校验值'; return 1; }
+  actual=${actual%% *}
+  normalized_actual=$(printf '%s' "$actual" | tr 'A-F' 'a-f')
+  normalized_expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
+  if [[ $normalized_actual != "$normalized_expected" ]]; then
+    failure_message="安装包校验失败：$package 与 SHA256SUMS 不一致"
+    return 1
+  fi
+}
+
+deploy_run_package() {
+  local remote rc=0
+  if ! remote=$(one_request ssh "${ssh_options[@]}" "$deploy_host" mktemp -d /tmp/code-server-deploy.XXXXXXXX); then
+    failure_message="无法通过 ssh $deploy_host 创建远端暂存目录；请确认 SSH 别名与免密登录可用"
+    return 1
+  fi
+  remote=$(printf '%s' "$remote" | tr -d '\r\n')
+  if [[ ! $remote =~ ^/tmp/code-server-deploy\.[A-Za-z0-9]+$ ]]; then
+    failure_message="远端返回的暂存目录异常：$remote"
+    return 1
+  fi
+  log "远端暂存目录：$remote"
+  if ! timeout --foreground "${DEPLOY_TIMEOUT_SECONDS}s" scp "${ssh_options[@]}" \
+    "${packages[0]}" "$deploy_host:$remote/$package"; then
+    failure_message="上传安装包到 $deploy_host:$remote 失败；远端未做任何修改"
+    return 1
+  fi
+  # Single attempt on purpose: a lost SSH response may mean the remote step already ran.
+  log '开始远端校验、备份、安装并重启服务…'
+  timeout --foreground "${DEPLOY_TIMEOUT_SECONDS}s" ssh "${ssh_options[@]}" "$deploy_host" \
+    env "DEPLOY_DRY_RUN=$deploy_dry_run" bash -s -- \
+    "$remote" "$expected" "$package" "$tag" "$expected_version" \
+    "$deploy_local_url" "$deploy_public_url" \
+    2>&1 <<'DEPLOY_REMOTE' | tee "$scratch/deploy-remote.log" || rc=$?
+# DEPLOY_REMOTE_BEGIN
+set -Eeuo pipefail
+stage=$1 expected=$2 package_name=$3 tag=$4 expected_version=$5 local_url=$6 public_url=$7
+[[ $stage =~ ^/tmp/code-server-deploy\.[A-Za-z0-9]+$ ]] || { echo "Bad staging path: $stage" >&2; exit 1; }
+[[ $expected =~ ^[a-fA-F0-9]{64}$ ]] || { echo "Bad checksum: $expected" >&2; exit 1; }
+[[ $package_name =~ ^code-server_[0-9A-Za-z.+~_-]+_amd64\.deb$ ]] || { echo "Bad package name: $package_name" >&2; exit 1; }
+[[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9][A-Za-z0-9.-]*)?$ ]] || { echo "Bad tag: $tag" >&2; exit 1; }
+[[ $expected_version =~ ^[0-9]+\.[0-9]+\.[0-9]+([+~][0-9A-Za-z.+~]+)?-1$ ]] || { echo "Bad Debian version: $expected_version" >&2; exit 1; }
+[[ $local_url =~ ^http://127\.0\.0\.1:[0-9]{1,5}/ ]] || { echo "Bad local URL: $local_url" >&2; exit 1; }
+[[ $public_url =~ ^https?:// ]] || { echo "Bad public URL: $public_url" >&2; exit 1; }
+[[ $(id -u) == 0 ]] || { echo 'Deployment requires a root SSH user' >&2; exit 1; }
+export DEBIAN_FRONTEND=noninteractive
+if command -v flock >/dev/null 2>&1; then
+  exec 9>/run/lock/code-server-deploy.lock
+  flock -n 9 || { echo 'Another deployment is already running' >&2; exit 1; }
+fi
+backup=''
+cleanup_remote() {
+  local rc=$?
+  [[ -z $backup ]] || echo "Backup kept: $backup" >&2
+  if (( rc )); then echo "Deployment failed (exit $rc); staging kept for inspection: $stage" >&2
+  else rm -rf -- "$stage"; fi
+}
+trap cleanup_remote EXIT
+cd "$stage"
+[[ -f $package_name ]] || { echo "Uploaded package $package_name is missing in $stage" >&2; exit 1; }
+printf '%s  %s\n' "$expected" "$package_name" | sha256sum -c -
+[[ $(dpkg-deb -f "$package_name" Package) == code-server ]] || { echo 'Unexpected package name inside deb' >&2; exit 1; }
+[[ $(dpkg-deb -f "$package_name" Architecture) == amd64 ]] || { echo 'Unexpected architecture inside deb' >&2; exit 1; }
+version=$(dpkg-deb -f "$package_name" Version)
+[[ $version == "$expected_version" ]] || { echo "Package version $version does not match expected $expected_version for tag $tag" >&2; exit 1; }
+unit=code-server-lite.service
+systemctl cat "$unit" >/dev/null || { echo "Systemd unit $unit not found" >&2; exit 1; }
+rm -rf preflight
+dpkg-deb -x "$package_name" preflight
+./preflight/usr/lib/code-server/node/bin/node --version
+if [[ ${DEPLOY_DRY_RUN:-0} == 1 ]]; then
+  echo "Dry run: $package_name ($version) verified; backup, install and restart skipped"
+  exit 0
+fi
+umask 077
+backup=$(mktemp -d /root/code-server-backup.XXXXXXXX)
+tar -czf "$backup/program-config.tar.gz" -C / \
+  usr/lib/code-server usr/bin/code-server etc/code-server-lite etc/systemd/system/code-server-lite.service
+cp -a /var/lib/dpkg/info/code-server.* "$backup/" 2>/dev/null || true
+dpkg-query -s code-server > "$backup/package-status.txt" 2>/dev/null || true
+echo "Backup directory: $backup"
+dpkg --force-confold -i "$package_name"
+systemctl restart "$unit"
+healthy=0
+for ((attempt=0; attempt<15; attempt++)); do
+  if systemctl is-active --quiet "$unit" \
+    && [[ $(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "$local_url" || true) == 200 ]]; then
+    healthy=1
+    break
+  fi
+  sleep 2
+done
+if (( ! healthy )); then
+  journalctl -u "$unit" -n 30 --no-pager >&2 || true
+  echo "Service $unit is not healthy after restart" >&2
+  exit 1
+fi
+installed=$(dpkg-query -W -f='${Version}' code-server)
+[[ $installed == "$version" ]] || { echo "Installed version $installed does not match $version" >&2; exit 1; }
+public_code=$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "$public_url" || true)
+[[ $public_code == 200 ]] || { echo "Public endpoint $public_url returned ${public_code:-no response} instead of 200" >&2; exit 1; }
+echo "Deployed code-server $version"
+# DEPLOY_REMOTE_END
+DEPLOY_REMOTE
+  if (( rc != 0 )); then
+    failure_message="远端部署失败（退出码 $rc）；上方输出包含原因与备份目录，脚本不会自动回滚"
+    return 1
+  fi
+}
+
+deploy_release() {
+  if ! resolve_run_artifact; then return 1; fi
+  if ! fetch_run_package; then return 1; fi
+  if ! deploy_run_package; then return 1; fi
+  if (( deploy_dry_run )); then
+    log "演练通过：$tag（来源运行：$run_url），远端未做任何修改"
+  else
+    log "已部署 $tag（来源运行：$run_url）"
+  fi
+}
+
+deploy_after_success() {
+  local rc=0
+  log "打包成功，开始自动部署：运行 $run_id（SSH 别名 $deploy_host，回环 $deploy_local_url）"
+  if deploy_release; then
+    if (( deploy_dry_run )); then
+      log 'DEPLOY_DRY_RUN=1：未备份、未安装、未重启服务。'
+      notify 'Ubuntu 部署演练完成' "DEPLOY_DRY_RUN=1：产物已校验并上传，远端只做只读预检，没有安装。$run_url"
+    else
+      log "自动部署完成：$tag"
+      notify 'Ubuntu 打包并部署成功' "$tag 已安装并重启服务。$run_url"
+    fi
+    notice_done=1
+    return 0
+  else
+    rc=$?
+  fi
+  log "自动部署失败：${failure_message}"
+  notify 'Ubuntu 打包成功但部署失败' "${failure_message}（运行日志：$run_url）"
+  notice_done=1
+  return 3
+}
+
 usage() {
   cat <<'HELP'
 用法：
-  bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1 [--ref main] [--repo owner/name]
-  bash scripts/release-ubuntu.sh --repo owner/name --run-id 123456 [--tag v0.1.0-lite.1]
-  bash scripts/release-ubuntu.sh --repo owner/name --request-id REQUEST_ID
+  bash scripts/release-ubuntu.sh --tag v0.1.0-lite.1 [--ref main] [--repo owner/name] [--no-deploy]
+  bash scripts/release-ubuntu.sh --repo owner/name --run-id 123456 [--tag v0.1.0-lite.1] [--no-deploy]
+  bash scripts/release-ubuntu.sh --repo owner/name --request-id REQUEST_ID [--no-deploy]
   bash scripts/release-ubuntu.sh --notify-test
 
 默认从 origin 读取仓库名，从当前分支读取 ref；打包前自动推送已有提交。
@@ -226,10 +443,25 @@ usage() {
 触发并监控 .github/workflows/release-ubuntu.yml（Ubuntu 18.10 amd64 安装包）。
 首次使用时该 workflow 必须已存在于默认分支。
 --allow-remote 跳过本地检查和自动推送，明确只构建远端代码。
+
+监控到 conclusion=success 后自动部署该次运行的产物（默认开启）：
+  1. 只使用该 run 的 artifact；缺失或过期直接失败，不会回退到 Release 最新版本；
+  2. artifact 名称中的标签必须与本次构建标签一致；
+  3. 本地按 SHA256SUMS 校验安装包，再经 scp 上传到服务器（沿用已有 SSH 别名）；
+  4. 服务器上先执行新 node 预检、备份 /usr/lib/code-server、/usr/bin/code-server、
+     /etc/code-server-lite 与 systemd 单元，再 dpkg --force-confold 安装；
+  5. 重启 unit 后验证回环地址与公网地址均返回 200，版本与标签要求一致。
+  --no-deploy 只监控不部署；--deploy-host 指定 SSH 别名（默认 vultr）。
+  DEPLOY_DRY_RUN=1 会照常下载、校验并上传安装包，在服务器完成只读预检后退出，
+  不备份、不安装、不重启，可用于演练整条链路。
+  部署失败退出码为 3，服务器上的备份目录会保留，脚本不做自动回滚。
 脚本不会自动提交、强推、推送标签、修改版本号或取消云端任务。Ctrl+C 仅停止本地监控。
-依赖：Bash、git、已登录的 gh、GNU timeout；Windows 请在 Git Bash 中运行。
+依赖：Bash、git、已登录的 gh、GNU timeout、ssh、scp、sha256sum；Windows 请在 Git Bash 中运行。
+退出码：0 成功（含部署成功）1 打包/配置错误 2 云端任务被取消 3 打包成功但部署失败 124 超时
 环境：RETRY_ATTEMPTS=5 RETRY_DELAY_SECONDS=2 REQUEST_TIMEOUT_SECONDS=90
       POLL_INTERVAL_SECONDS=15 DISCOVERY_TIMEOUT_SECONDS=300 MONITOR_TIMEOUT_SECONDS=14400
+      DEPLOY_TIMEOUT_SECONDS=300 DEPLOY_SSH_HOST=vultr DEPLOY_DRY_RUN=0
+      DEPLOY_LOCAL_URL=http://127.0.0.1:8444/vscode/ DEPLOY_PUBLIC_URL=https://meamoe.top/vscode/
 HELP
 }
 
@@ -238,14 +470,20 @@ main() {
   export GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat
   export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
   repo='' ref='' tag='' run_id='' request_id='' source_sha='' run_url=''
-  local allow_remote=0 notify_test=0 option value remote sha_local
+  artifact='' package='' expected='' expected_version='' work=''
+  deploy_host=${DEPLOY_SSH_HOST:-vultr}
+  deploy_local_url=${DEPLOY_LOCAL_URL:-http://127.0.0.1:8444/vscode/}
+  deploy_public_url=${DEPLOY_PUBLIC_URL:-https://meamoe.top/vscode/}
+  deploy_dry_run=${DEPLOY_DRY_RUN:-0}
+  local allow_remote=0 notify_test=0 deploy_requested=1 option value tool remote sha_local rc=0
   RETRY_ATTEMPTS=${RETRY_ATTEMPTS:-5}
   RETRY_DELAY_SECONDS=${RETRY_DELAY_SECONDS:-2}
   REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-90}
   POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-15}
   DISCOVERY_TIMEOUT_SECONDS=${DISCOVERY_TIMEOUT_SECONDS:-300}
   MONITOR_TIMEOUT_SECONDS=${MONITOR_TIMEOUT_SECONDS:-14400}
-  for value in "$RETRY_ATTEMPTS" "$RETRY_DELAY_SECONDS" "$REQUEST_TIMEOUT_SECONDS" "$POLL_INTERVAL_SECONDS" "$DISCOVERY_TIMEOUT_SECONDS" "$MONITOR_TIMEOUT_SECONDS"; do
+  DEPLOY_TIMEOUT_SECONDS=${DEPLOY_TIMEOUT_SECONDS:-300}
+  for value in "$RETRY_ATTEMPTS" "$RETRY_DELAY_SECONDS" "$REQUEST_TIMEOUT_SECONDS" "$POLL_INTERVAL_SECONDS" "$DISCOVERY_TIMEOUT_SECONDS" "$MONITOR_TIMEOUT_SECONDS" "$DEPLOY_TIMEOUT_SECONDS"; do
     [[ $value =~ ^[1-9][0-9]{0,5}$ ]] || { log '超时/重试参数必须为正整数（最多 6 位）'; return 1; }
   done
   (( RETRY_ATTEMPTS <= 10 )) || { log 'RETRY_ATTEMPTS 最大 10'; return 1; }
@@ -254,14 +492,16 @@ main() {
     case "$option" in
       --help|-h) usage; return 0 ;;
       --allow-remote) allow_remote=1 ;;
+      --no-deploy) deploy_requested=0 ;;
       --notify-test) notify_test=1 ;;
-      --repo|--ref|--tag|--run-id|--request-id)
+      --repo|--ref|--tag|--run-id|--request-id|--deploy-host)
         (( $# )) || { log "$option 缺少参数"; return 1; }
         value=$1; shift
         [[ -n $value && $value != --* ]] || { log "$option 参数无效"; return 1; }
         case "$option" in
           --repo) repo=$value ;; --ref) ref=$value ;; --tag) tag=$value ;;
           --run-id) run_id=$value ;; --request-id) request_id=$value ;;
+          --deploy-host) deploy_host=$value ;;
         esac ;;
       *) log "未知参数：$option"; usage; return 1 ;;
     esac
@@ -269,6 +509,11 @@ main() {
   command -v timeout >/dev/null && timeout --version 2>/dev/null | grep -q 'GNU coreutils' || { log '需要 GNU timeout（Windows 使用 Git Bash）'; return 1; }
   if (( notify_test )); then notify 'Ubuntu 打包通知测试' '通知组件工作正常。此操作不会触发构建。'; return 0; fi
   command -v gh >/dev/null || { log '请安装 GitHub CLI 并执行 gh auth login'; return 1; }
+  if (( deploy_requested )); then
+    for tool in ssh scp sha256sum; do
+      command -v "$tool" >/dev/null || { log "自动部署需要 $tool；如只需监控打包请加 --no-deploy"; return 1; }
+    done
+  fi
   if [[ -z $repo ]]; then
     remote=$(git remote get-url origin) || { log '请使用 --repo owner/name 指定仓库'; return 1; }
     case "$remote" in
@@ -284,14 +529,21 @@ main() {
   [[ -z $run_id || $run_id =~ ^[1-9][0-9]*$ ]] || { log '运行 ID 必须是正整数'; return 1; }
   [[ -z $request_id || $request_id =~ ^[A-Za-z0-9-]{1,80}$ ]] || { log '请求 ID 格式无效'; return 1; }
   [[ -z $run_id || -z $request_id ]] || { log '--run-id 与 --request-id 不能同时指定'; return 1; }
+  [[ $deploy_host =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || { log '--deploy-host 必须是合法的 SSH 别名'; return 1; }
+  [[ $deploy_local_url =~ ^http://127\.0\.0\.1:[0-9]{1,5}/ ]] || { log 'DEPLOY_LOCAL_URL 必须是 http://127.0.0.1:端口/ 形式'; return 1; }
+  [[ $deploy_public_url =~ ^https?:// ]] || { log 'DEPLOY_PUBLIC_URL 必须是 http(s) URL'; return 1; }
+  [[ $deploy_dry_run =~ ^[01]$ ]] || { log 'DEPLOY_DRY_RUN 只能是 0 或 1'; return 1; }
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/release-ubuntu.XXXXXX")
   notice_done=0
   failure_message='脚本发生错误；请检查终端输出'
   trap cleanup EXIT
   trap 'failure_message="收到中断，仅停止本地监控；云端任务未取消"; exit 130' INT
   trap 'failure_message="收到终止信号，仅停止本地监控；云端任务未取消"; exit 143' TERM
-  if [[ -n $run_id ]]; then monitor; return; fi
-  if [[ -n $request_id ]]; then discover; monitor; return; fi
+  if [[ -n $run_id ]]; then
+    monitor || rc=$?
+  elif [[ -n $request_id ]]; then
+    if discover; then monitor || rc=$?; else rc=$?; fi
+  else
   [[ -n $tag ]] || { failure_message='必须使用 --tag 指定 Release 标签'; return 1; }
   [[ -n $ref ]] || ref=$(git symbolic-ref --quiet --short HEAD) || { failure_message='分离 HEAD 状态请使用 --ref'; return 1; }
   if (( ! allow_remote )); then
@@ -310,8 +562,14 @@ main() {
   request_id="$(date -u '+%Y%m%dT%H%M%S')-$$-$RANDOM-$RANDOM"
   log "仓库：$repo；ref：$ref；固定源码：$source_sha；Release：$tag"
   log "请求 ID：$request_id（如触发结果不明，用 --request-id 此值恢复）"
-  dispatch
-  monitor
+  if dispatch; then monitor || rc=$?; else rc=$?; fi
+  fi
+  (( rc == 0 )) || return "$rc"
+  if (( ! deploy_requested )); then
+    log "已按 --no-deploy 跳过自动部署；如需部署可对本次运行重跑：bash scripts/release-ubuntu.sh --repo $repo --run-id $run_id"
+    return 0
+  fi
+  deploy_after_success
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
