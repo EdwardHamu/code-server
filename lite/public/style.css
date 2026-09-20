@@ -623,3 +623,11 @@ footer {
 
 /* Only visible lines produce highlighting/line-number DOM nodes. */
 #gutter-lines, #highlight-lines { display: block; font: inherit; will-change: auto; }
+
+/* Subdirectory suggestions under the absolute path input. */
+.path-field { position: relative; }
+.path-field input { width: 100%; min-width: 0; }
+#directory-suggest { position: absolute; left: 0; right: 0; top: 100%; z-index: 20; margin: 4px 0 0; padding: 4px 0; list-style: none; max-height: 240px; overflow-y: auto; background: var(--md-surface-c-high); border: 1px solid var(--md-outline-variant); border-radius: 8px; box-shadow: 0 6px 18px #0009; }
+#directory-suggest li { padding: 6px 10px; cursor: pointer; font: 12px/1.6 ui-monospace, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--md-on-surface); }
+#directory-suggest li:hover, #directory-suggest li[aria-selected="true"] { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+#directory-suggest li.suggest-hint { cursor: default; color: var(--md-on-surface-variant); font-family: inherit; }

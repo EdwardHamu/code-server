@@ -85,11 +85,27 @@ try{
  assert.equal(await evaluate('$("recent-dirs").options[1].value'),outside);
  await evaluate('$("forget-recent").click()');await until('$("recent-dirs").options.length===3');
  assert.equal(JSON.parse(await fs.readFile(path.join(tmp,'state.json'),'utf8')).recentDirectories.some(e=>e.path===outside),false);
+ // Subdirectory suggestion dropdown on the path input.
+ await fs.mkdir(path.join(outside,'alpha'));await fs.mkdir(path.join(outside,'alps'));await fs.mkdir(path.join(outside,'beta'));await fs.writeFile(path.join(outside,'alfile.txt'),'');
+ const prefix=path.join(outside,'al');
+ await evaluate(`$('directory-path').focus();$('directory-path').value=${JSON.stringify(prefix)};$('directory-path').dispatchEvent(new Event('input'))`);
+ await until('suggest.state().open');
+ assert.deepEqual(await evaluate('suggest.state().items'),['alpha','alps'],'directories only, filtered by partial segment');
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+ await send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+ assert.equal(await evaluate('suggest.state().active'),0);
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+ await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+ await until(`state.directory===${JSON.stringify(path.join(outside,'alpha'))}`);
+ assert.equal(await evaluate('suggest.state().open'),false);
+ assert.equal(await evaluate('$("directory-path").value'),path.join(outside,'alpha'));
+ await evaluate(`$('directory-path').focus();$('directory-path').value=${JSON.stringify(path.join(outside,'zzz'))};$('directory-path').dispatchEvent(new Event('input'))`);
+ await wait(400);assert.equal(await evaluate('suggest.state().open'),false,'no matches closes the list');
  await send('HeapProfiler.collectGarbage');const loaded=await send('Performance.getMetrics');
  assert.deepEqual(errors,[]);
  if(process.env.SCREENSHOT){const shot=await send('Page.captureScreenshot',{format:'png'});await fs.writeFile(process.env.SCREENSHOT,Buffer.from(shot.data,'base64'));}
  const heap=m=>Object.fromEntries(m.metrics.filter(x=>['JSHeapUsedSize','JSHeapTotalSize','Nodes','Documents','JSEventListeners'].includes(x.name)).map(x=>[x.name,x.value]));
- console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, absolute directory navigation, external file/folder creation and save, failed navigation preserves tree, parent navigation preserves editor, recent-directory list/select/forget with server persistence, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
+ console.log(JSON.stringify({browser:browserPath,checks:'login, file listing, native input + Ctrl-S save to real disk, escaped highlighting, repeated file switches, viewport-bounded highlight nodes and line numbers, Git status, absolute directory navigation, external file/folder creation and save, failed navigation preserves tree, parent navigation preserves editor, recent-directory list/select/forget with server persistence, subdirectory suggestion dropdown with keyboard selection, no uncaught exceptions',idle:heap(idle),afterRepeatedOpen:heap(loaded),notes:'Browser renderer JS heap after forced GC, NOT total browser RAM; synthetic fixture only.'},null,2));
 }catch(e){console.error(e);process.exitCode=1;}
 finally{
  if(socket?.readyState===1){try{await send('Browser.close',{},null);}catch{}socket.close();}

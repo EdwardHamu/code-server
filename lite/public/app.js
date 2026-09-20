@@ -157,8 +157,71 @@ function absolutePath(value) {
 async function browseDirectory() {
   const target = $('directory-path').value;
   if (!absolutePath(target)) throw new Error('请输入服务器绝对路径');
+  suggest.close();
   await refreshFiles(target);
 }
+// Subdirectory suggestions: list the parent of the typed path and filter by the
+// partial last segment. Read-only listing; it never records directory history.
+const suggest = (() => {
+  const input = $('directory-path'), list = $('directory-suggest');
+  let items = [], active = -1, epoch = 0, timer = null, cache = {key:'', entries:[]};
+  const sep = () => state.pathStyle === 'windows' ? '\\' : '/';
+  function split(value) {
+    const m = state.pathStyle === 'windows' ? /^([a-z]:[\\/](?:.*[\\/])?)([^\\/]*)$/i.exec(value) : /^(\/(?:.*\/)?)([^/]*)$/.exec(value);
+    return m ? {parent:m[1], partial:m[2]} : null;
+  }
+  function close() { list.hidden = true; list.replaceChildren(); items = []; active = -1; input.setAttribute('aria-expanded', 'false'); }
+  function render(entries, partial) {
+    const lower = partial.toLowerCase();
+    items = entries.filter(e => e.name.toLowerCase().startsWith(lower)).slice(0, 50);
+    active = -1; list.replaceChildren();
+    if (!items.length) { close(); return; }
+    for (const [i, item] of items.entries()) {
+      const li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = item.name + sep(); li.title = item.path; li.dataset.index = i;
+      li.addEventListener('mousedown', e => { e.preventDefault(); choose(i, true); });
+      list.append(li);
+    }
+    if (entries.length > items.length) { const hint = document.createElement('li'); hint.className = 'suggest-hint'; hint.textContent = `仅显示前 ${items.length} 个匹配子目录`; list.append(hint); }
+    list.hidden = false; input.setAttribute('aria-expanded', 'true');
+  }
+  function highlight(index) {
+    active = index; const options = list.querySelectorAll('[role="option"]');
+    options.forEach((el, i) => el.setAttribute('aria-selected', String(i === active)));
+    options[active]?.scrollIntoView?.({block:'nearest'});
+  }
+  function choose(index, open = false) {
+    const item = items[index]; if (!item) return;
+    input.value = item.path.replace(/[\\/]$/, '') + sep(); close();
+    input.focus();
+    if (open) browseDirectory().catch(err => notice(err.message, true)); else update();
+  }
+  async function update() {
+    const value = input.value, parts = split(value);
+    if (!parts || !absolutePath(value)) { close(); return; }
+    const id = ++epoch;
+    try {
+      if (cache.key !== parts.parent) {
+        const result = await api('files?path=' + encodeURIComponent(parts.parent));
+        if (id !== epoch) return;
+        cache = {key:parts.parent, entries:result.entries.filter(e => e.kind === 'directory')};
+      }
+      if (id === epoch && document.activeElement === input) render(cache.entries, parts.partial);
+    } catch { if (id === epoch) close(); }
+  }
+  function schedule() { clearTimeout(timer); timer = setTimeout(update, 120); }
+  input.addEventListener('input', schedule);
+  input.addEventListener('focus', schedule);
+  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('keydown', e => {
+    if (list.hidden) { if (e.key === 'ArrowDown') { e.preventDefault(); update(); } return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); highlight((active + 1) % items.length); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); highlight((active - 1 + items.length) % items.length); }
+    else if (e.key === 'Tab' && items.length) { e.preventDefault(); choose(active < 0 ? 0 : active); }
+    else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopImmediatePropagation(); choose(active, true); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  }, true);
+  return {close, update, state: () => ({open:!list.hidden, items:items.map(i => i.name), active})};
+})();
 async function createEntry(directory) {
   const prefix = state.directory.replace(/[\\/]$/, '') + (state.pathStyle === 'windows' ? '\\' : '/');
   const name = prompt(directory ? '新目录的服务器绝对路径（父目录须已存在）' : '新文件的服务器绝对路径（父目录须已存在）', prefix);
