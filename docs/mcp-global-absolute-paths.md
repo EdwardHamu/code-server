@@ -58,3 +58,9 @@
 - 因此**未安装** v0.1.2，生产仍为 v0.1.1（root 单元，运行正常）。
 - 根因：`ci/build-ubuntu-package.sh` 的 `copy_runtime` 使用固定文件列表，未包含新增的 `lite/state.mjs`。已修复并在 `ci/test-build-ubuntu-package.sh` 增加校验：包内必须含 `state.mjs`，且 `lite/server.mjs` 静态导入的全部同目录模块都必须打入包。离线打包测试在本地 Linux 通过（Windows 无 dpkg-deb 跳过）。
 - 后续：提交此修复，发布 v0.1.3（或重新发布），再安装。服务器 `/tmp/code-server_0.1.2-1_amd64.deb` 与 `/tmp/x` 为检查残留，可删除。
+
+## v0.1.3 生产部署（2026-09-19）
+
+- `code-server_0.1.3-1_amd64.deb` sha256 `03d7f4b902e2e44c63b7883982e3db25527f954ad6a4b16ee218db5bd57961a6`，Tag v0.1.3，包内含 `lite/state.mjs`；安装前用包内 Node 在临时端口试运行正常。
+- `dpkg -i` 从 0.1.1-1 升级到 0.1.3-1，重启后 active、NRestarts=0、root 运行；日志显示 `directory history: /root/.code-server-lite/state.json`；`https://meamoe.top/vscode/` 返回 200 且页面含历史目录控件。
+- 状态文件在首次打开目录时创建。安装包备份 `/root/code-server_0.1.3-1_amd64.deb`；已删除服务器上有缺陷的 0.1.2 包与解包目录。
